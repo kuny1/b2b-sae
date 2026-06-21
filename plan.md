@@ -244,6 +244,43 @@ Island 和全页 React 使用同一套路由机制。差异只在于 fallback JS
 
 服务端决策，不在客户端做二次替换。
 
+```mermaid
+sequenceDiagram
+    participant Browser as 🌐 浏览器
+    participant JSP as 📄 JSP 页面
+    participant Router as 🔀 island-router.jsp
+    participant TCC as ⚙️ TCC 配置中心
+    participant Fallback as 📁 fallback/xxx.jsp
+
+    Browser->>JSP: GET /order/detail?id=123
+    JSP->>JSP: 输出 window.$page = {...}<br/>（数据层，两个分支共享）
+
+    JSP->>Router: &lt;jsp:include route="approval-status"/&gt;
+
+    Router->>TCC: ConfigService.getJsonMap("island.routes")
+    alt TCC 正常
+        TCC-->>Router: { renderer: "react", island: "approvalStatus", traffic: 0.5 }
+        Router->>Router: hash(userId + ":" + route) % 100<br/>bucket = 42
+        Router->>Router: useReact = "react" == renderer<br/>  && bucket < traffic × 100
+
+        alt useReact == true
+            Router-->>Browser: 输出：空 &lt;div id="root"&gt;<br/>+ vendor.hash.js<br/>+ island.hash.js<br/>+ mount 调用
+            Note over Browser: ~230ms 后 React 渲染完成
+        else useReact == false
+            Router->>Fallback: &lt;jsp:include fallback/approval-status.jsp/&gt;
+            Fallback-->>Browser: 输出：完整 HTML + jQuery 事件绑定<br/>（旧代码完整保留）
+        end
+
+    else TCC 不可用
+        TCC-->>Router: null / 异常
+        Router->>Fallback: 默认走 jQuery 分支
+        Fallback-->>Browser: 输出：完整 HTML + jQuery 事件绑定
+        Note over Router,Browser: 降级：不依赖 TCC 即可正常渲染
+    end
+```
+
+实现代码：
+
 ```jsp
 <%-- /WEB-INF/includes/island-router.jsp --%>
 <%
@@ -429,6 +466,31 @@ Day 30：清理旧代码
 ```
 
 **部署流水线**：
+
+```mermaid
+flowchart LR
+    subgraph CI["🔄 前端 CI（每次发版自动执行）"]
+        Build["npm run build<br/>(Vite · Preact · IIFE)"] --> CDN["上传 dist/ 到 CDN<br/>*.js 带 hash 文件名<br/>Cache-Control: immutable"]
+        Build --> Manifest["读取 manifest.json"]
+        Manifest --> TCC_Push["推送到 TCC<br/>key: island.manifest"]
+    end
+
+    subgraph Runtime["🌐 用户请求时"]
+        JSP_Req["JSP 渲染<br/>调用 IslandResolver.getUrl()"] --> TCC_Read["读 TCC island.manifest<br/>（缓存 1 分钟 TTL）"]
+        TCC_Read --> Resolve["解析 hash 文件名"]
+        Resolve --> Output["输出 &lt;script src='...'&gt;<br/>带当前版本的 hash"]
+    end
+
+    CI --> Runtime
+    TCC_Push -..->|"TCC 配置中心"| TCC_Read
+
+    subgraph Degrade["🛡️ 降级路径"]
+        TCC_Fail["TCC 不可用"] -.-> Cache["返回上次缓存<br/>（不抛异常、不白屏）"]
+    end
+    TCC_Read -.-> Degrade
+```
+
+**详细步骤**：
 
 ```
 前端 CI：
@@ -760,6 +822,7 @@ resolve: {
 | 05 | React Island 组件 | [`task-05-react-island.md`](../tasks/task-05-react-island.md) | 01,03 | ✅ 与 02,04 并行 |
 | 06 | Router 集成 + Fallback JSP | [`task-06-feature-flag-jsp.md`](../tasks/task-06-feature-flag-jsp.md) | 02,04,05 | — |
 | 07 | 集成+量化+灰度 | [`task-07-integration-qa.md`](../tasks/task-07-integration-qa.md) | 06 | — |
+| 08 | 质量保障体系 | [`task-08-quality.md`](../tasks/task-08-quality.md) | 01,02,05 | ✅ 随代码产出并行编写 |
 
 ### 并行建议
 
@@ -775,10 +838,12 @@ Wave 3（01 完成后并行）：
   任务 02（jQuery Store 化）      ← 开发者 A（熟悉现有审批逻辑）
   任务 05（React Island）         ← 开发者 B（熟悉 React）
   任务 04（Resolver + Router）    ← Java 开发者（一次性，后续零成本）
-  注：任务 03 在 Wave 1 已完成，任务 02/04/05 可同时启动
+  任务 08（Store 测试 + 组件测试） ← 随 02/05 代码产出同步编写
+  注：任务 03 在 Wave 1 已完成，任务 02/04/05/08 可同时启动
 
 Wave 4（02+04+05 完成后）：
   任务 06（Router 集成 + Fallback JSP）← 开发者 A + B
+  任务 08（E2E 用例 + 视觉回归）       ← 随 06 集成后补充
 
 Wave 5（06 完成后）：
   任务 07（集成+量化+灰度）        ← 开发者 A + B

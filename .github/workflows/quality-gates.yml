@@ -1,0 +1,174 @@
+# Quality gates — layered execution from fast to slow.
+#
+# Layer 1 (every PR):  Store + Component tests (< 5s total)
+# Layer 2 (staging):   E2E smoke tests + visual regression
+# Layer 3 (grayscale): Manual gate — checked at each traffic % step
+#
+# See proposal.md §3 and task-08-quality.md for the full quality strategy.
+
+name: Quality Gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  # ── Layer 1: Fast unit tests (every PR, every push) ──
+  unit-tests:
+    name: Store + Component Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+
+      - run: npm ci
+      - run: npx vitest run --reporter=verbose --reporter=junit --outputFile=test-results/unit.xml
+
+      - name: Store test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: test-results/
+
+  # ── Layer 1: Build verification (every PR) ──
+  build:
+    name: Build Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Verify artifacts
+        run: |
+          test -f dist/vendor/vendor.*.js || (echo "Missing vendor.js" && exit 1)
+          test -f dist/islands/approvalStatus.*.js || (echo "Missing approvalStatus.js" && exit 1)
+          test -f dist/.vite/manifest.json || (echo "Missing manifest.json" && exit 1)
+          echo "Build artifacts verified"
+
+      - name: Store dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # ── Layer 2: E2E smoke tests (staging deploy) ──
+  # Only runs when triggered by staging deployment webhook.
+  # Uses traditional Playwright selectors — fast, no AI cost.
+  e2e-smoke:
+    name: E2E Smoke Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'workflow_dispatch'
+    needs: [unit-tests, build]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Run smoke tests
+        run: npx playwright test --project=e2e --grep 'Smoke'
+        env:
+          PLAYWRIGHT_BASE_URL: ${{ vars.STAGING_URL }}
+
+      - name: Store E2E results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-smoke-results
+          path: test-results/
+
+  # ── Layer 2: Visual regression (staging deploy) ──
+  visual-regression:
+    name: Visual Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'workflow_dispatch'
+    needs: [e2e-smoke]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Run visual tests
+        run: npx playwright test --project=visual
+        env:
+          PLAYWRIGHT_BASE_URL: ${{ vars.STAGING_URL }}
+
+      - name: Store screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-diffs
+          path: test-results/
+
+  # ── Layer 2: Full E2E with Midscene.js (staging, expensive) ──
+  # Runs AI-driven E2E on staging deploy.
+  # Only if MIDSCENE_API_KEY is configured.
+  e2e-full:
+    name: E2E Full (Midscene.js)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'workflow_dispatch' && vars.MIDSCENE_API_KEY != ''
+    needs: [e2e-smoke]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Run AI-driven E2E
+        run: npx playwright test --project=e2e
+        env:
+          PLAYWRIGHT_BASE_URL: ${{ vars.STAGING_URL }}
+          MIDSCENE_MODEL: gpt-4o
+          OPENAI_API_KEY: ${{ secrets.MIDSCENE_API_KEY }}
+
+      - name: Store E2E results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-full-results
+          path: test-results/
+
+  # ── Layer 3: Grayscale gate ──
+  # Manual verification checklist at each traffic percentage.
+  # See proposal.md §3.4 for pass/fail criteria at each stage.
+  grayscale-status:
+    name: Grayscale Gate Summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    if: always() && github.event_name == 'workflow_dispatch'
+    needs: [unit-tests, build, e2e-smoke, visual-regression]
+
+    steps:
+      - name: Summary
+        run: |
+          echo "## Grayscale Gate Status" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Unit tests | ${{ needs.unit-tests.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build | ${{ needs.build.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| E2E smoke | ${{ needs.e2e-smoke.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Visual regression | ${{ needs.visual-regression.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
