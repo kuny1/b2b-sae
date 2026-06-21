@@ -31,8 +31,8 @@
 | jQuery 分支功能正常 | 完整的审批流程（提交→审批→驳回→重提交） | 与改造前一致 |
 | React 分支功能正常 | 同上 | 与 jQuery 分支行为等价 |
 | 分支切换数据一致 | 在 jQuery 分支审批通过 → 切到 React 分支 → 查看 | 状态一致（读同一 Store） |
-| 异常降级 | 模拟 Island JS 404 → 页面行为 | JSP 走 jQuery 降级分支 |
-| 异常降级 | 模拟 TCC 不可用 → 页面行为 | IslandResolver 返回旧缓存 |
+| 异常降级 | 模拟 Island JS 404 → 页面行为 | React 分支：空 div，审批面板空白；监控上报加载失败 |
+| 异常降级 | 模拟 TCC 不可用 → 页面行为 | island-router.jsp 默认走 jQuery 分支，页面正常 |
 | 错误上报 | Island 崩溃 → 监控平台 | ErrorBoundary 上报，页面不白屏 |
 
 ### 步骤 2：量化对比数据产出
@@ -81,10 +81,11 @@ Day 10：100%
 
 ### 步骤 5：清理旧代码（灰度 100% 稳定 30 天后）
 
-1. 删除 `approval-status-jquery.inc.jsp`
-2. 删除 JSP 中 `if (useReact)` 的条件判断 → 保留 React 分支
-3. 删除与该区块相关的 jQuery 事件绑定代码
-4. Zustand Store 不变
+1. 删除 `fallback/approval-status.jsp`（jQuery 版本不再需要）
+2. 从 `island.routes` TCC 配置中移除 `approval-status` 条目（或保留，renderer 固定 "react"）
+3. JSP 中 `island-router.jsp` include 保持不变（全页 React 化后此 include 也会移除）
+4. 删除与该区块相关的独立 jQuery JS 文件
+5. Zustand Store 不变
 
 ## 里程碑
 

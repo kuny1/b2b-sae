@@ -24,7 +24,7 @@
 
 1. `src/islands/approvalStatus/index.tsx` — 审批状态面板 Island
 2. `src/components/ErrorBoundary.tsx` — 通用 ErrorBoundary（所有 Island 复用）
-3. `src/components/IslandErrorBoundary.tsx` — Island 专用 ErrorBoundary（失败时保持 JSP DOM 可见）
+3. `src/components/IslandErrorBoundary.tsx` — Island 专用 ErrorBoundary（崩溃时返回 null，上报监控；恢复依赖 TCC 切回 jQuery 分支）
 
 ## 步骤
 
@@ -47,9 +47,10 @@ export class IslandErrorBoundary extends Component<Props, { crashed: boolean }> 
   }
 
   componentDidCatch(error: Error) {
-    // 上报监控
+    // 上报监控，触发告警
     console.error(`[Island:${this.props.islandName}] crashed:`, error.message);
-    // Feature flag 的 else 分支中 JSP 旧代码自动兜底
+    // 注意：island-router.jsp 的 React 分支中，JSP 兜底内容从未下发到浏览器
+    // 恢复依赖运维将 TCC renderer 切回 "jquery" + 用户刷新
   }
 
   render() {
@@ -119,7 +120,7 @@ function ApprovalStatusPanel({ orderId }: Props) {
 
 // IIFE 挂载
 (window as any).__islands = (window as any).__islands || {};
-(window as any).__islands.ApprovalStatus = {
+(window as any).__islands.approvalStatus = {
   mount: (selector: string, props: Props) => {
     const { createRoot } = require('preact/compat');
     const root = createRoot(document.querySelector(selector)!);

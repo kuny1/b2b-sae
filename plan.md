@@ -249,10 +249,11 @@ Island 和全页 React 使用同一套路由机制。差异只在于 fallback JS
 <%
   String route = request.getParameter("route");
   Map<String, Map<String, Object>> routes = ConfigService.getJsonMap("island.routes");
-  Map<String, Object> cfg = routes.get(route);
+  Map<String, Object> cfg = routes != null ? routes.get(route) : null;
 
-  String renderer = cfg.get("renderer");   // "react" | "jquery"
-  double traffic  = cfg.get("traffic");    // 0.0 ~ 1.0
+  String renderer = cfg != null ? (String) cfg.getOrDefault("renderer", "jquery") : "jquery";
+  double traffic  = cfg != null ? ((Number) cfg.getOrDefault("traffic", 1.0)).doubleValue() : 1.0;
+  String island   = cfg != null ? (String) cfg.get("island") : null;
 
   // 灰度决策：确定性哈希（分布式一致，零服务端状态）
   String userId = getUserId(request);
@@ -260,19 +261,22 @@ Island 和全页 React 使用同一套路由机制。差异只在于 fallback JS
   int bucket    = Math.abs(seed.hashCode()) % 100;
   boolean useReact = "react".equals(renderer) && bucket < (int)(traffic * 100);
 
-  if (useReact) {
+  if (useReact && island != null) {
 %>
     <%-- 分支 A：React。JSP HTML 不生成，只出空容器 --%>
     <div id="island-root-<%= route %>"></div>
     <script src="<%= IslandResolver.getUrl("vendor") %>"></script>
-    <script src="<%= IslandResolver.getUrl((String)cfg.get("island")) %>"></script>
+    <script src="<%= IslandResolver.getUrl(island) %>"></script>
     <script>
-      __islands[toPascalCase('<%= cfg.get("island") %>')].mount('#island-root-<%= route %>');
+      (function() {
+        var ns = window.__islands && window.__islands['<%= island %>'];
+        if (ns && ns.mount) ns.mount('#island-root-<%= route %>');
+      })();
     </script>
 <%
   } else {
 %>
-    <%-- 分支 B：jQuery。直接 include 旧 JSP（从未被删除）--%>
+    <%-- 分支 B：jQuery。直接 include fallback JSP --%>
     <jsp:include page="/WEB-INF/includes/fallback/<%= route %>.jsp" />
 <%
   }
@@ -341,7 +345,7 @@ DEV 环境右下角注入调试面板：下拉选择 react/jquery → 写 cookie
 ```
 出问题 → TCC 改 renderer: "jquery" → 秒级生效 → 用户刷新即恢复
   不需要代码回滚，不需要部署
-  JSP 中 else 分支的旧代码一直存在，只是之前没执行
+  fallback JSP 一直存在于 /WEB-INF/includes/fallback/ 目录，router 切回即用
 ```
 
 ### Island vs 全页的统一
@@ -568,29 +572,31 @@ resolve: {
 ### 三层保障体系
 
 ```
-第 1 层：island.routes 集中路由
-  JSP 通过 island-router.jsp 集中决策走 React 还是 jQuery
+第 1 层：island.routes 集中路由（服务端）
+  island-router.jsp 根据 TCC 配置决定走 React 还是 jQuery 分支
   出问题：TCC 改 renderer="jquery" → 秒级生效 → 用户刷新即恢复
   不需要代码回滚，不需要部署
-  JSP 中 else 分支的旧代码一直存在，只是之前没执行
+  fallback JSP 始终存在于 /WEB-INF/includes/fallback/ 目录，切回即用
 
-第 2 层：Island 自身的错误隔离
+第 2 层：IslandResolver + Manifest 降级链（服务端）
+  TCC 不可用 → IslandResolver 返回上次缓存的 manifest（不抛异常）
+  island.routes 不可用 → island-router.jsp 默认走 jQuery 分支
+  任何服务端环节失败都不会导致白屏
+
+第 3 层：ErrorBoundary 错误隔离（客户端）
   每个 Island 包裹 ErrorBoundary
-  React 崩溃 → 该区域显示 JSP 兜底内容
-  不影响页面其他区域（包括其他 Island）
-
-第 3 层：Manifest + TCC 降级
-  TCC 不可用 → IslandResolver 返回上次缓存 manifest
-  TCC 不可用 → ConfigService 使用默认值（jquery 分支不依赖 routes）
-  任何环节都不会导致白屏
+  React 崩溃 → 返回 null，该区域空白，不影响页面其他区域
+  崩溃事件上报监控，触发告警 → 运维评估是否切回 jQuery 分支
+  注意：ErrorBoundary 无法恢复出 JSP 内容（React 分支中 JSP 内容从未下发到浏览器）
+  真正的恢复依赖第 1 层：TCC 切 renderer="jquery" + 用户刷新
 ```
 
 ### 降级路径对比
 
 | 场景 | 表现 | 恢复方式 |
 |---|---|---|
-| Island JS 加载失败（网络/CDN） | island-router.jsp 的 react 分支出了 script 标签加载失败 → JSP 空 div 可见 | 运维改 TCC renderer="jquery" |
-| Island 运行时崩溃 | ErrorBoundary 捕获，该区域降级 | 自动 |
+| Island JS 加载失败（网络/CDN） | React 分支：空 div 可见，审批面板区域空白 | 运维改 TCC renderer="jquery" → 用户刷新 |
+| Island 运行时崩溃 | ErrorBoundary 捕获，返回 null，区域空白；上报监控告警 | 运维评估后改 TCC renderer="jquery"（非自动） |
 | 需要全局回滚 React | TCC 改 renderer="jquery"，秒级切回 | 运维操作 |
 | TCC 不可用 | IslandResolver 返回缓存 manifest；routes 降级走默认 jquery | 自动 |
 | 开发调试 | Query Param `?__r_approval-status=react\|jquery` | 开发者手动 |
